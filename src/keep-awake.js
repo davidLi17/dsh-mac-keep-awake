@@ -200,7 +200,6 @@ export function createKeepAwakeController(options = {}) {
   let provenTimer = null
   let disposed = false
   let acquiredAt = 0
-  let acquisitions = 0
   let warnedUnsupported = false
 
   const needed = () => enabled && !disposed && held.size > 0
@@ -209,7 +208,10 @@ export function createKeepAwakeController(options = {}) {
   function assertionArgv() {
     const argv = [executable, '-i']
     if (preventDisplaySleep) argv.push('-d')
-    if (maxHours > 0) argv.push('-t', String(Math.round(maxHours * 3600)))
+    // A maxHours below 1/7200 rounds to `-t 0`, whose behaviour is undefined;
+    // such a value is nonsense anyway, so treat it as no cap at all.
+    const capSeconds = Math.round(maxHours * 3600)
+    if (maxHours > 0 && capSeconds > 0) argv.push('-t', String(capSeconds))
     // `-w` last and always present: it is what makes an orphan impossible.
     argv.push('-w', String(watchPid))
     return argv
@@ -246,9 +248,7 @@ export function createKeepAwakeController(options = {}) {
           `[keep-awake] the assertion has been healthy for ${PROVEN_MS}ms; resetting the retry ladders`,
         )
       }
-      failures = 0
-      losses = 0
-      gaveUpLogged = false
+      resetLadders()
     }, PROVEN_MS)
     provenTimer?.unref?.()
   }
@@ -269,11 +269,9 @@ export function createKeepAwakeController(options = {}) {
 
   function acquire(reason) {
     if (child !== null || disposed || !supported) return
-    // Bumping here is belt-and-braces: `onEnd` and `release` already bump on
-    // every path that ends an attempt, so removing this line is not observable
-    // (verified by mutation — every scenario behaves identically). It stays
-    // because it makes the invariant local and obvious: each attempt owns a
-    // generation no other attempt can match.
+    // Belt-and-braces (unobservable via mutation): every other path that ends an
+    // attempt bumps the generation. It stays because it makes the invariant
+    // local — each attempt owns a generation no other attempt can match.
     const gen = ++generation
     const argv = assertionArgv()
 
@@ -363,7 +361,6 @@ export function createKeepAwakeController(options = {}) {
     if (gen !== generation) return
     child = handle
     acquiredAt = now()
-    acquisitions += 1
     armProven(gen)
     logger?.info?.(
       `[keep-awake] holding PreventUserIdleSystemSleep (${reason}); ` +
@@ -377,16 +374,17 @@ export function createKeepAwakeController(options = {}) {
    * The handle is tracked until it reports exit, so a later `dispose()` can
    * still escalate it. Cancelling a pending escalation instead of running it
    * would strand the child alive holding the assertion — exactly the state this
-   * whole mechanism exists to prevent.
+   * whole mechanism exists to prevent. The exact reason an escalation is armed
+   * never varies and carries no information, so it is not parameterised.
    */
-  function terminate(handle, reason) {
+  function terminate(handle) {
     try {
       handle.kill('SIGTERM')
     } catch (error) {
       logger?.warn?.('[keep-awake] could not stop caffeinate', error)
     }
     if (typeof handle.exited !== 'function' || handle.exited()) {
-      logger?.info?.(`[keep-awake] released the sleep assertion (${reason})`)
+      logger?.info?.('[keep-awake] released the sleep assertion')
       return
     }
     const pending = { handle, timer: null }
@@ -403,10 +401,10 @@ export function createKeepAwakeController(options = {}) {
     }, KILL_GRACE_MS)
     pending.timer?.unref?.()
     escalations.add(pending)
-    logger?.info?.(`[keep-awake] released the sleep assertion (${reason})`)
+    logger?.info?.('[keep-awake] released the sleep assertion')
   }
 
-  function release(reason) {
+  function release() {
     const handle = child
     if (handle === null) return
     // Invalidate first, so the exit this causes is never read as a failure.
@@ -414,14 +412,14 @@ export function createKeepAwakeController(options = {}) {
     clearProven()
     child = null
     acquiredAt = 0
-    terminate(handle, reason)
+    terminate(handle)
   }
 
   /**
    * Leave every pending escalation armed so it fires on its own schedule.
    *
-   * Called by `dispose()`. This is deliberately a no-op beyond clearing the
-   * current child, because both of the "obvious" alternatives are wrong:
+   * Called by `dispose()`. This is deliberately a no-op, because both of the
+   * "obvious" alternatives are wrong:
    *
    *   - **Cancelling** the pending escalations strands a SIGTERM-ignoring child
    *     alive, holding the assertion, while the controller reports everything
@@ -435,29 +433,11 @@ export function createKeepAwakeController(options = {}) {
    * `exited()` when it fires, so a child that died on SIGTERM is left alone and
    * a stubborn one is still SIGKILLed. The timers are unref'd, so they never
    * hold the process open, and `caffeinate -w <host pid>` remains the backstop
-   * if the host exits before they fire.
+   * if the host exits before they fire. Kept as a named seam so the decision is
+   * documented where `dispose()` reads it, and not "cleaned up" into the buggy
+   * alternatives later.
    */
-  function settleEscalations() {
-    // Intentionally empty: see the note above. Kept as a named seam so the
-    // decision is documented where dispose() reads it, and so the reasoning is
-    // not silently "cleaned up" into the buggy alternatives later.
-  }
-
-  /** Bring the live assertion in line with the running-session set. */
-  function sync(reason = 'sync') {
-    if (!supported) {
-      if (needed() && !warnedUnsupported) {
-        warnedUnsupported = true
-        logger?.warn?.(
-          `[keep-awake] platform "${platform}" is not supported; sessions keep running, ` +
-            `but no sleep assertion is held`,
-        )
-      }
-      return
-    }
-    if (needed() && child === null) acquire(reason)
-    else if (!needed() && child !== null) release(reason)
-  }
+  function settleEscalations() {}
 
   /**
    * Reset both ladders — a real state change deserves a fresh budget.
@@ -474,30 +454,46 @@ export function createKeepAwakeController(options = {}) {
     clearRetry()
   }
 
+  /**
+   * Bring the live assertion in line with the running-session set.
+   *
+   * `change` is the logical outcome of an event/periodic tick: hold if any
+   * session is running, release otherwise. Acquire only when nothing is held
+   * (a retry timer can never double up — it also checks this) and release only
+   * when something is. `disposed` is folded into `needed()`.
+   */
+  function sync() {
+    if (!supported) {
+      if (needed() && !warnedUnsupported) {
+        warnedUnsupported = true
+        logger?.warn?.(
+          `[keep-awake] platform "${platform}" is not supported; sessions keep running, ` +
+            `but no sleep assertion is held`,
+        )
+      }
+      return
+    }
+    if (needed() && child === null) acquire('session running')
+    else if (!needed() && child !== null) release('session idle')
+  }
+
   return {
     /**
      * A session entered the running state. Idempotent per id.
      *
-     * The `disposed` check here is redundant with `needed()` inside `sync`, and
-     * mutation testing confirms it: removing it changes nothing observable,
-     * because a disposed controller can never spawn. It is kept for a different
-     * reason — a disposed controller should not accumulate session ids it will
-     * never act on, and reading `enter` alone should make the "no work after
-     * dispose" contract obvious without tracing into `sync`.
-     *
-     * The `held.has` check is likewise an *equivalent mutant* for the count:
-     * `Set.add` dedupes, so repeated `enter` for one session still yields one
-     * held id and one spawn either way. What it actually prevents is
-     * `resetLadders()` running on every duplicate signal — the host can emit
-     * several `running` notifications for one session, and each would otherwise
-     * wipe a live child's retry backoff.
+     * The `held.has` check is an *equivalent mutant* for the count: `Set.add`
+     * dedupes, so repeated `enter` for one session still yields one held id and
+     * one spawn either way. What it actually prevents is `resetLadders()`
+     * running on every duplicate signal — the host can emit several `running`
+     * notifications for one session, and each would otherwise wipe a live
+     * child's retry backoff.
      */
     enter(sessionId) {
       if (disposed || typeof sessionId !== 'string' || sessionId === '') return
       if (held.has(sessionId)) return
       held.add(sessionId)
       resetLadders()
-      sync('session running')
+      sync()
     },
 
     /**
@@ -512,7 +508,7 @@ export function createKeepAwakeController(options = {}) {
       if (typeof sessionId !== 'string' || sessionId === '') return
       if (!held.delete(sessionId)) return
       resetLadders()
-      sync('session idle')
+      sync()
     },
 
     /**
@@ -541,7 +537,7 @@ export function createKeepAwakeController(options = {}) {
       held.clear()
       for (const id of next) held.add(id)
       resetLadders()
-      sync('reconciled with the live registry')
+      sync()
     },
 
     sync,
@@ -556,7 +552,6 @@ export function createKeepAwakeController(options = {}) {
         heldCount: held.size,
         held: [...held],
         acquiredAt,
-        acquisitions,
         failures,
         losses,
         retryPending: retryTimer !== null,
@@ -573,7 +568,7 @@ export function createKeepAwakeController(options = {}) {
       // does not confirm exit. Escalations armed by EARLIER releases are left
       // running on purpose — see `settleEscalations` for why cancelling them
       // leaks a stubborn child and why force-killing them is spurious.
-      release('plugin disposed')
+      release()
       settleEscalations()
     },
   }

@@ -1,3 +1,8 @@
 node_modules/
 vendor/
 .verify/
+.am-pages/
+*.architecture.html
+*.architecture.json
+*.architecture.visual-check*
+dsh-mac-keep-awake.architecture*

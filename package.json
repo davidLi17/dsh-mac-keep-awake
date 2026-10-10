@@ -1,6 +1,6 @@
 {
   "name": "dsh-mac-keep-awake",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Keep macOS awake (no idle system sleep) while a DeepSeek Harness session is running. · 会话进行时不让 Mac 空闲休眠的 DSH 插件。",
   "repository": {
     "type": "git",

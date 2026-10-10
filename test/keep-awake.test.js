@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createKeepAwakeController } from '../src/keep-awake.js'
+import { createKeepAwakeController, spawnCaffeinate } from '../src/keep-awake.js'
 
 /** A fake caffeinate that records argv and lets the test fire callbacks. */
 function fakeSpawn() {
@@ -86,6 +86,27 @@ test('preventDisplaySleep adds -d, maxHours adds -t', () => {
   const { controller, spawn } = make({ preventDisplaySleep: true, maxHours: 2 })
   controller.enter('a')
   assert.deepEqual(spawn.calls[0].argv, ['/usr/bin/caffeinate', '-i', '-d', '-t', '7200', '-w', '4242'])
+})
+
+test('a maxHours so small it rounds to `-t 0` adds no -t flag', () => {
+  // `caffeinate -t 0` has undefined behaviour; a maxHours below 1/7200 rounds
+  // to it. Such a value is nonsense, so the controller treats it as no cap
+  // instead of passing the flag through.
+  const { controller, spawn } = make({ maxHours: 0.0001 })
+  controller.enter('a')
+  assert.deepEqual(spawn.calls[0].argv, ['/usr/bin/caffeinate', '-i', '-w', '4242'])
+})
+
+test('a real spawn failure reports onError once and does not throw', async () => {
+  // Exercises the real `spawnCaffeinate` error path, including the
+  // belt-and-braces kill guard: a failed spawn has no pid, so the kill must be
+  // skipped and the error surfaced exactly once.
+  const errors = []
+  spawnCaffeinate(['/nonexistent-path/caffeinate-test-fixture'], {
+    onError: (error) => errors.push(error),
+  })
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.equal(errors.length, 1, 'exactly one error event for a failed spawn')
 })
 
 test('a second session reuses the one assertion', () => {

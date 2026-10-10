@@ -63,20 +63,28 @@ export const Config = z.object({
     .description('Also keep the display on (adds `-d`). Off by default: the screen may still turn off.'),
   maxHours: z
     .number()
+    .min(0)
     .default(0)
-    .description('Safety cap in hours after which the assertion self-expires. 0 disables the cap.'),
+    .description(
+      'Cap in hours for EACH assertion attempt. When the cap expires the plugin ' +
+        're-acquires while sessions still run, so this bounds one attempt, not the ' +
+        'total hold time. 0 disables the cap.',
+    ),
   reconcileSeconds: z
     .number()
+    .min(0)
     .default(60)
     .description('How often to reconcile the held set against the live agent registry. 0 disables it.'),
   executable: z.string().default(DEFAULT_EXECUTABLE).description('Path to the caffeinate binary.'),
 })
 
 /**
- * Every session id the live registry currently knows about, running or not.
+ * Every live session id the registry knows about, running or not.
  *
  * Defensive on purpose: a registry shape change must degrade to "no sessions"
- * rather than throw inside a timer and take the plugin down.
+ * rather than throw inside a timer and take the plugin down. Used only to prune
+ * stale compaction brackets, so ids are matched by identity — an empty id would
+ * never match a real one anyway.
  *
  * @param {object} agentsService - `ctx.agents`
  * @returns {string[]}
@@ -84,11 +92,7 @@ export const Config = z.object({
 function liveSessionIds(agentsService) {
   try {
     const agents = agentsService?.list?.() ?? []
-    const ids = []
-    for (const agent of agents) {
-      if (agent && typeof agent.id === 'string' && agent.id !== '') ids.push(agent.id)
-    }
-    return ids
+    return agents.filter((agent) => typeof agent?.id === 'string' && agent.id !== '').map((a) => a.id)
   } catch {
     return []
   }
@@ -123,12 +127,9 @@ function liveSessionIds(agentsService) {
 function runningSessionIds(agentsService) {
   try {
     const agents = agentsService?.list?.() ?? []
-    const ids = []
-    for (const agent of agents) {
-      if (!agent || typeof agent.id !== 'string') continue
-      if (agent.status === 'running') ids.push(agent.id)
-    }
-    return ids
+    return agents
+      .filter((agent) => agent && typeof agent.id === 'string' && agent.status === 'running')
+      .map((agent) => agent.id)
   } catch {
     return []
   }
@@ -142,7 +143,6 @@ export function apply(ctx, config = {}) {
     executable: config.executable ?? DEFAULT_EXECUTABLE,
     preventDisplaySleep: config.preventDisplaySleep ?? false,
     maxHours: config.maxHours ?? 0,
-    enabled: config.enabled ?? true,
     watchPid: process.pid,
     platform,
     logger,
@@ -160,10 +160,10 @@ export function apply(ctx, config = {}) {
   // 1: the authoritative per-session running/idle transition, plus the teardown
   // edge for a session disposed while still marked running.
   //
-  // `compacting` is declared first because BOTH the teardown handler below and
-  // the reconcile loop must be able to see it: a session disposed mid-compaction
-  // would otherwise stay in the set, and the next reconcile — which unions the
-  // set in — would resurrect the assertion for a session that no longer exists.
+  // An `idle` for a session with an open compaction bracket is ignored: the
+  // bracket exists precisely because the status reads `idle` while real work
+  // runs, so such an event can only be redundant. The bracket is closed by
+  // `compaction/end`, `agent/disposed`, or the reconcile prune — never here.
   const compacting = new Set()
 
   ctx.effect(
@@ -173,7 +173,7 @@ export function apply(ctx, config = {}) {
         ({ agent, status }) => {
           if (!agent || typeof agent.id !== 'string') return
           if (status === 'running') controller.enter(agent.id)
-          else controller.leave(agent.id)
+          else if (!compacting.has(agent.id)) controller.leave(agent.id)
         },
         { global: true },
       ),
@@ -232,39 +232,37 @@ export function apply(ctx, config = {}) {
   // The immediate pass is what covers "plugin loaded while a session is
   // already running" — including this plugin's own hot reload. Sessions with an
   // open compaction bracket are unioned in, because the registry cannot see them.
-  const reconcile = (why) => {
+  const reconcile = () => {
     const live = liveSessionIds(ctx.get('agents'))
 
     // Prune brackets whose session no longer exists. `agent/disposed` normally
     // handles this, but the bracket set is the one piece of state the registry
     // cannot correct on its own — an unpruned entry would be unioned back in on
     // every pass and pin the assertion forever.
-    for (const id of [...compacting]) {
+    for (const id of compacting) {
       if (!live.includes(id)) compacting.delete(id)
     }
 
     const active = runningSessionIds(ctx.get('agents'))
     controller.reconcile([...new Set([...active, ...compacting])])
-
-    const snap = controller.snapshot()
-    if (snap.active) {
-      logger.info?.(
-        `[keep-awake] ${why}: holding the sleep assertion for ${snap.heldCount} active session(s)`,
-      )
-    }
   }
 
-  reconcile('initial reconcile')
+  reconcile()
 
   const seconds = config.reconcileSeconds ?? 60
   if (seconds > 0) {
     ctx.effect(() => {
       // A plain unref'd timer, not `ctx.interval`: the `timer` mixin throws when
       // `timer` is not in `inject`, and this must never hold the process open.
-      const handle = setInterval(() => reconcile('periodic reconcile'), seconds * 1000)
+      const handle = setInterval(reconcile, seconds * 1000)
       handle.unref?.()
       return () => clearInterval(handle)
     }, 'dsh-mac-keep-awake: reconcile loop')
+  }
+
+  if (!(config.enabled ?? true)) {
+    logger.info?.('[keep-awake] loaded but disabled by config; holding nothing')
+    return
   }
 
   logger.info?.(

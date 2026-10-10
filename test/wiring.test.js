@@ -101,6 +101,28 @@ test('the Config schema has working defaults', () => {
   assert.equal(parsed.executable, '/usr/bin/caffeinate')
 })
 
+test('negative maxHours and reconcileSeconds are rejected by the schema', () => {
+  // Negative values are nonsense: a negative cap would silently mean "uncapped"
+  // and a negative interval would never pass the `seconds > 0` gate. The schema
+  // is where that gets caught, loudly.
+  assert.throws(() => new Config({ maxHours: -1 }))
+  assert.throws(() => new Config({ reconcileSeconds: -1 }))
+})
+
+test('the final log does not claim active when the plugin is disabled', () => {
+  // `enabled: false` used to log the full "active — caffeinate …" line, which
+  // reads as if an assertion were held. It must say it is disabled instead.
+  const logger = recordingLogger()
+  const ctx = fakeCtx({ logger })
+  apply(ctx, { enabled: false })
+  try {
+    assert.ok(!logger.lines.some((l) => /caffeinate -i/.test(l.text)), 'no active command line')
+    assert.ok(logger.lines.some((l) => /disabled/.test(l.text)), 'it says it is disabled')
+  } finally {
+    ctx.disposeAll()
+  }
+})
+
 test('every agent-scoped listener is registered globally', () => {
   // The regression guard. Without `{ global: true }` these never fire, and the
   // plugin is silently inert — the failure mode has no error and no log line.
@@ -264,6 +286,27 @@ test('a manual /compact holds the assertion even though status says idle', { ski
       1,
       'compaction holds the assertion even while status reads idle',
     )
+
+    ctx.dispatch('session/event', { id: 'session-a' }, { type: 'compaction/end' })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(heldForSelf().length, 0, 'released when the bracket closes')
+  })
+})
+
+test('a redundant idle event during an open compaction bracket does not release', { skip: !isDarwin }, async () => {
+  // The bracket exists precisely because the status reads `idle` while real
+  // work runs, so an `idle` event for a session with an open bracket can only
+  // be redundant. It must not drop the assertion; only `compaction/end`,
+  // `agent/disposed`, or the reconcile prune may close the bracket.
+  const agents = [{ id: 'session-a', status: 'idle' }]
+  await withPlugin({ agents }, async (ctx) => {
+    ctx.dispatch('session/event', { id: 'session-a' }, { type: 'compaction/start' })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(heldForSelf().length, 1)
+
+    ctx.dispatch('agent/status', { agent: { id: 'session-a' }, status: 'idle' })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(heldForSelf().length, 1, 'still held despite the stray idle event')
 
     ctx.dispatch('session/event', { id: 'session-a' }, { type: 'compaction/end' })
     await new Promise((resolve) => setTimeout(resolve, 250))

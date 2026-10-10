@@ -26,7 +26,7 @@
 | `-i` | 只阻止**系统空闲休眠**，**不**阻止屏幕息屏 |
 | `-w <pid>` | 被监视的进程退出时，caffeinate 自己退出 —— 崩溃安全网 |
 | `-d` | （可选，默认关）同时阻止屏幕息屏 |
-| `-t <秒>` | （可选，默认关）兜底超时，到点自动释放 |
+| `-t <秒>` | （可选，默认关）**每次断言**的兜底超时，到点自动结束（插件随即重新获取，见下节） |
 
 ### 断言断了怎么办：两条阶梯，都不终止
 
@@ -96,6 +96,9 @@ error 打**一次**，然后继续按 60 秒的节奏重试。这样即使原因
    （实证：用本机 app 内的 cordis 4.0.4 + dsh-scope 复核过；宿主自带的
    api-session-controller / compaction-basic / agent-team / subagent 监听同样
    的事件时都没传这个选项。）
+   括号开着的会话收到 `idle` 事件会被忽略：括号存在的意义就是"状态读作 idle
+   但实际在干活"，这种事件只能是冗余的。括号只能由 `compaction/end`、
+   `agent/disposed` 或对账收敛关闭。
 2. **`agent/disposed`** —— 会话在仍被标记为 running 时被销毁的兜底释放
    （同样带上 `{ global: true }`，理由同上）。
 3. **`session/event` 里的 `compaction/start` … `compaction/end`** —— 补 `maintenance` 盲区，见下。
@@ -141,7 +144,7 @@ get status() { return this.phase.kind === 'idle' || this.phase.kind === 'mainten
   config:
     enabled: true            # 总开关
     preventDisplaySleep: false  # true = 屏幕也不息屏（加 -d）
-    maxHours: 0              # >0 = 兜底超时（小时），到点自动释放
+    maxHours: 0              # >0 = 每次断言的兜底超时（小时）；到点后只要会话还在跑就会重新获取；0 = 关闭
     reconcileSeconds: 60     # 对账间隔；0 = 关闭对账
     executable: /usr/bin/caffeinate
 ```
@@ -153,7 +156,7 @@ get status() { return this.phase.kind === 'idle' || this.phase.kind === 'mainten
 node scripts/install.mjs
 
 # 2. 用 DSH 插件管理器装（desktop profile 只能由 Electron 应用管理）
-#    spec: file:vendor/dsh-mac-keep-awake-1.4.1.tgz
+#    spec: file:vendor/dsh-mac-keep-awake-1.4.2.tgz
 ```
 
 安装后 bundle 自带的 `cordis.patch.yml` 会插入 Host 半身；
@@ -165,14 +168,14 @@ node scripts/install.mjs
 node --test test/*.test.js
 ```
 
-- `test/keep-awake.test.js` —— 34 个单元测试，注入假 spawn 与可控时钟，验证**计数与阶梯逻辑**：
+- `test/keep-awake.test.js` —— 36 个单元测试，注入假 spawn 与可控时钟，验证**计数与阶梯逻辑**：
   重复事件、交错 enter/leave、对账与事件竞争、过期回调不能复活句柄、
   正常退出（退出码 0）不算失败、带信号退出仍算失败、
   反复的正常到期不会升级、瞬间正常退出会升级、失败阶梯不终止且能自愈、
   健康计时器重置阶梯、过期健康计时器不误重置、
   SIGTERM 无效时升级 SIGKILL、**dispose 不会漏掉还在宽限期里的子进程**、
   非 darwin 平台降级。
-- `test/wiring.test.js` —— 15 个接线测试，用假 cordis ctx 验证 `index.js`：
+- `test/wiring.test.js` —— 18 个接线测试，用假 cordis ctx 验证 `index.js`：
   `{ global: true }` 回归守卫（验证每个 agent 事件恰好注册一次且带该选项）、
   热重载时对已在运行的会话立即获取、malformed payload 不抛异常、
   手动 `/compact` 期间仍持有断言、对账不会丢掉开着的 compaction 括号、

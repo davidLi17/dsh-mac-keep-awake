@@ -27,7 +27,7 @@ The assertion is provided by the child process `caffeinate -i -w <DSH host proce
 | `-i` | Prevents **idle system sleep** only; does **not** prevent the display from turning off |
 | `-w <pid>` | When the watched process exits, caffeinate exits by itself — the crash safety net |
 | `-d` | (Optional, off by default) also prevents the display from turning off |
-| `-t <secs>` | (Optional, off by default) fallback timeout; releases automatically when it expires |
+| `-t <secs>` | (Optional, off by default) fallback timeout for **each** assertion attempt; ends by itself when it expires (the plugin re-acquires right away, see the next section) |
 
 ### What happens if the assertion breaks: two ladders, neither is terminal
 
@@ -111,7 +111,10 @@ exits before they fire, `caffeinate -w <host pid>` is still the last line of def
    one with this option is unaffected. (Empirically verified: re-checked with cordis
    4.0.4 + dsh-scope inside the local app; the host's own api-session-controller /
    compaction-basic / agent-team / subagent listeners do not pass this option either when
-   listening to the same events.)
+   listening to the same events.) An `idle` event for a session with an open compaction
+   bracket is ignored: the bracket exists precisely because the status reads `idle` while
+   real work runs, so such an event can only be redundant. The bracket is closed only by
+   `compaction/end`, `agent/disposed`, or the reconcile prune.
 2. **`agent/disposed`** — the fallback release for a session destroyed while still marked
    running (also passes `{ global: true }`, for the same reason as above).
 3. **`compaction/start` … `compaction/end` inside `session/event`** — covers the
@@ -166,7 +169,7 @@ Override the `config` of this row in the profile's `cordis.patch.yml`:
   config:
     enabled: true            # master switch
     preventDisplaySleep: false  # true = the display stays on too (adds -d)
-    maxHours: 0              # >0 = fallback timeout (hours); releases automatically when it expires
+    maxHours: 0              # >0 = per-attempt fallback timeout (hours); the plugin re-acquires while sessions still run; 0 = off
     reconcileSeconds: 60     # reconcile interval; 0 = reconciliation off
     executable: /usr/bin/caffeinate
 ```
@@ -179,7 +182,7 @@ node scripts/install.mjs
 
 # 2. Install it with the DSH plugin manager (the desktop profile can only be
 #    managed by the Electron app)
-#    spec: file:vendor/dsh-mac-keep-awake-1.4.1.tgz
+#    spec: file:vendor/dsh-mac-keep-awake-1.4.2.tgz
 ```
 
 After installation the bundle's own `cordis.patch.yml` inserts the Host half;
@@ -192,7 +195,7 @@ effect, with no app restart.
 node --test test/*.test.js
 ```
 
-- `test/keep-awake.test.js` — 34 unit tests, with an injected fake spawn and a
+- `test/keep-awake.test.js` — 36 unit tests, with an injected fake spawn and a
   controllable clock, verifying the **counting and ladder logic**: duplicate events,
   interleaved enter/leave, reconcile racing with events, a stale callback cannot
   resurrect a handle, a clean exit (exit code 0) is not counted as a failure, an exit with
@@ -201,7 +204,7 @@ node --test test/*.test.js
   timer resets the ladders, a stale health timer does not reset by mistake, SIGTERM not
   working escalates to SIGKILL, **dispose does not miss a child process still inside its
   grace window**, and the non-darwin platform degradation.
-- `test/wiring.test.js` — 15 wiring tests, using a fake cordis ctx to verify `index.js`:
+- `test/wiring.test.js` — 18 wiring tests, using a fake cordis ctx to verify `index.js`:
   the `{ global: true }` regression guard (verifying every agent event is registered
   exactly once and with that option), immediate acquisition for an already-running session
   on hot reload, a malformed payload does not throw, the assertion is still held during a
