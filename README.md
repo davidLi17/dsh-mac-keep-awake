@@ -149,6 +149,9 @@ get status() { return this.phase.kind === 'idle' || this.phase.kind === 'mainten
     executable: /usr/bin/caffeinate
 ```
 
+`enabled: true`（默认）根据 DSH 会话状态自动管理防休眠；`enabled: false` 完全禁用防休眠，不启动 `caffeinate`。
+默认仍允许屏幕息屏，`maxHours` 和 `reconcileSeconds` 的行为不变。
+
 ## 安装
 
 ```bash
@@ -175,8 +178,10 @@ node --test test/*.test.js
   健康计时器重置阶梯、过期健康计时器不误重置、
   SIGTERM 无效时升级 SIGKILL、**dispose 不会漏掉还在宽限期里的子进程**、
   非 darwin 平台降级。
-- `test/wiring.test.js` —— 18 个接线测试，用假 cordis ctx 验证 `index.js`：
-  `{ global: true }` 回归守卫（验证每个 agent 事件恰好注册一次且带该选项）、
+- `test/wiring.test.js` —— 23 个接线测试，用假 cordis ctx 验证 `index.js`：
+  跨平台模拟子进程验证禁用、默认启用、多会话和退出清理；macOS 用 `pmset` 验证真实断言，
+  其他平台跳过真机用例。
+  另覆盖 `{ global: true }` 回归守卫（验证每个 agent 事件恰好注册一次且带该选项）、
   热重载时对已在运行的会话立即获取、malformed payload 不抛异常、
   手动 `/compact` 期间仍持有断言、对账不会丢掉开着的 compaction 括号、
   压缩中被销毁的会话不会永久钉住机器、

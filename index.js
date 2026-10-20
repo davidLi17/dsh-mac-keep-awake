@@ -140,6 +140,7 @@ export function apply(ctx, config = {}) {
   const platform = process.platform
 
   const controller = createKeepAwakeController({
+    enabled: config.enabled ?? true,
     executable: config.executable ?? DEFAULT_EXECUTABLE,
     preventDisplaySleep: config.preventDisplaySleep ?? false,
     maxHours: config.maxHours ?? 0,

@@ -174,6 +174,10 @@ Override the `config` of this row in the profile's `cordis.patch.yml`:
     executable: /usr/bin/caffeinate
 ```
 
+`enabled: true` (the default) automatically manages sleep prevention from DSH session state;
+`enabled: false` disables it entirely and never starts `caffeinate`. The display may still sleep
+by default; `maxHours` and `reconcileSeconds` keep their existing behavior.
+
 ## Installation
 
 ```bash
@@ -204,8 +208,10 @@ node --test test/*.test.js
   timer resets the ladders, a stale health timer does not reset by mistake, SIGTERM not
   working escalates to SIGKILL, **dispose does not miss a child process still inside its
   grace window**, and the non-darwin platform degradation.
-- `test/wiring.test.js` — 18 wiring tests, using a fake cordis ctx to verify `index.js`:
-  the `{ global: true }` regression guard (verifying every agent event is registered
+- `test/wiring.test.js` — 23 wiring tests, using a fake cordis ctx to verify `index.js`:
+  portable child-process mocks cover disabled/default settings, multiple sessions, and disposal;
+  macOS cases verify real assertions with `pmset` and are skipped on other platforms.
+  Coverage also includes the `{ global: true }` regression guard (verifying every agent event is registered
   exactly once and with that option), immediate acquisition for an already-running session
   on hot reload, a malformed payload does not throw, the assertion is still held during a
   manual `/compact`, reconciliation does not drop an open compaction bracket, a session
