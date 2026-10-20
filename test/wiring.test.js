@@ -14,14 +14,16 @@
  * A fake cordis context stands in for the harness: it records registrations and
  * lets the test dispatch events by hand.
  *
- * Because `apply()` builds its own controller internally, the tests observe the
- * result the only way that actually matters: through the operating system, by
- * reading `pmset -g assertions` for a caffeinate watching THIS test process.
+ * Portable regressions run the real controller with a mocked child-process
+ * boundary and a controlled reconciliation interval. macOS-only cases also
+ * read `pmset -g assertions` for a caffeinate watching THIS test process.
  * Every test disposes its fiber, so no caffeinate outlives the suite.
  */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import childProcess, { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { syncBuiltinESMExports } from 'node:module'
 import { test } from 'node:test'
 import { apply, Config } from '../index.js'
 
@@ -58,6 +60,53 @@ function fakeCtx({ agents = [], logger = null } = {}) {
     },
   }
   return ctx
+}
+
+/** Exercise the macOS wiring on any platform without starting real processes. */
+function mockedPlugin(t, options = {}) {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  const children = []
+  const intervals = new Set()
+  const ctx = options.ctx ?? fakeCtx(options)
+  const spawn = t.mock.method(childProcess, 'spawn', (executable, args) => {
+    const child = new EventEmitter()
+    child.pid = 1000 + children.length
+    child.argv = [executable, ...args]
+    child.signals = []
+    child.unref = () => {}
+    child.kill = (signal) => {
+      child.signals.push(signal)
+      child.emit('exit', null, signal)
+      return true
+    }
+    children.push(child)
+    return child
+  })
+  syncBuiltinESMExports()
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => {
+    const timer = { fn, ms, unref() {} }
+    intervals.add(timer)
+    return timer
+  })
+  t.mock.method(globalThis, 'clearInterval', (timer) => intervals.delete(timer))
+  t.after(() => {
+    ctx.disposeAll()
+    spawn.mock.restore()
+    syncBuiltinESMExports()
+    Object.defineProperty(process, 'platform', platform)
+  })
+  apply(ctx, options.config ?? {})
+  return {
+    ctx,
+    children,
+    intervals,
+    active: () => children.filter((child) => child.signals.length === 0),
+    reconcile: () => {
+      assert.equal(intervals.size, 1, 'the periodic reconcile is registered')
+      for (const timer of intervals) timer.fn()
+    },
+  }
 }
 
 /** Collect log lines so tests can assert on the narration. */
@@ -109,12 +158,12 @@ test('negative maxHours and reconcileSeconds are rejected by the schema', () => 
   assert.throws(() => new Config({ reconcileSeconds: -1 }))
 })
 
-test('the final log does not claim active when the plugin is disabled', () => {
+test('the final log does not claim active when the plugin is disabled', (t) => {
   // `enabled: false` used to log the full "active — caffeinate …" line, which
   // reads as if an assertion were held. It must say it is disabled instead.
   const logger = recordingLogger()
   const ctx = fakeCtx({ logger })
-  apply(ctx, { enabled: false })
+  mockedPlugin(t, { ctx, config: { enabled: false } })
   try {
     assert.ok(!logger.lines.some((l) => /caffeinate -i/.test(l.text)), 'no active command line')
     assert.ok(logger.lines.some((l) => /disabled/.test(l.text)), 'it says it is disabled')
@@ -123,11 +172,11 @@ test('the final log does not claim active when the plugin is disabled', () => {
   }
 })
 
-test('every agent-scoped listener is registered globally', () => {
+test('every agent-scoped listener is registered globally', (t) => {
   // The regression guard. Without `{ global: true }` these never fire, and the
   // plugin is silently inert — the failure mode has no error and no log line.
   const ctx = fakeCtx()
-  apply(ctx, {})
+  mockedPlugin(t, { ctx })
   try {
     for (const name of ['agent/status', 'agent/disposed', 'session/event']) {
       const options = ctx.listenerOptions(name)
@@ -141,6 +190,77 @@ test('every agent-scoped listener is registered globally', () => {
   } finally {
     ctx.disposeAll()
   }
+})
+
+test('disabled wiring never spawns for initial, event, or periodic activity', (t) => {
+  const agents = [{ id: 'already-running', status: 'running' }]
+  const plugin = mockedPlugin(t, { agents, config: { enabled: false } })
+  assert.equal(plugin.children.length, 0, 'initial reconcile must not spawn')
+
+  plugin.ctx.dispatch('agent/status', { agent: { id: 'new-session' }, status: 'running' })
+  plugin.ctx.dispatch('session/event', { id: 'compacting' }, { type: 'compaction/start' })
+  assert.equal(plugin.children.length, 0, 'events must not spawn')
+
+  agents.push({ id: 'new-session', status: 'running' }, { id: 'compacting', status: 'idle' })
+  plugin.reconcile()
+  assert.equal(plugin.children.length, 0, 'periodic reconcile must not spawn')
+  assert.equal(plugin.active().length, 0, 'no process can hold a sleep assertion')
+})
+
+test('default wiring acquires on running and releases on idle', (t) => {
+  const { ctx, children, active, intervals } = mockedPlugin(t, { config: {} })
+  assert.equal(children.length, 0)
+  assert.equal([...intervals][0].ms, 60_000, 'the default reconcile interval is unchanged')
+  ctx.dispatch('agent/status', { agent: { id: 'a' }, status: 'running' })
+  assert.equal(active().length, 1)
+  assert.deepEqual(children[0].argv, ['/usr/bin/caffeinate', '-i', '-w', String(process.pid)])
+  ctx.dispatch('agent/status', { agent: { id: 'a' }, status: 'idle' })
+  assert.deepEqual(children[0].signals, ['SIGTERM'])
+  assert.equal(active().length, 0)
+})
+
+test('wiring shares one process across sessions and reconciliation', (t) => {
+  const agents = [{ id: 'a', status: 'running' }, { id: 'b', status: 'running' }]
+  const { ctx, children, active, reconcile } = mockedPlugin(t, { agents })
+  assert.equal(active().length, 1, 'initial reconcile recovers already-running sessions')
+  for (const agent of agents) ctx.dispatch('agent/status', { agent, status: 'running' })
+  reconcile()
+  assert.equal(children.length, 1, 'duplicate events and reconciliation reuse the process')
+
+  agents[0].status = 'idle'
+  ctx.dispatch('agent/status', { agent: agents[0], status: 'idle' })
+  reconcile()
+  assert.equal(active().length, 1, 'the second session keeps it held')
+  agents[1].status = 'idle'
+  ctx.dispatch('agent/status', { agent: agents[1], status: 'idle' })
+  reconcile()
+  assert.equal(active().length, 0, 'the last idle releases it')
+  assert.equal(children.length, 1, 'no replacement process was spawned')
+})
+
+test('disposing the wiring stops its child and reconciliation loop', (t) => {
+  const { ctx, children, active, intervals } = mockedPlugin(t, {
+    agents: [{ id: 'a', status: 'running' }],
+  })
+  const pendingTick = [...intervals][0].fn
+  assert.equal(active().length, 1)
+  ctx.disposeAll()
+  assert.deepEqual(children[0].signals, ['SIGTERM'])
+  assert.equal(active().length, 0)
+  assert.equal(intervals.size, 0)
+  pendingTick()
+  ctx.dispatch('agent/status', { agent: { id: 'late' }, status: 'running' })
+  assert.equal(children.length, 1, 'late callbacks cannot resurrect the disposed controller')
+})
+
+test('disabled wiring holds no real macOS assertion', { skip: !isDarwin }, async () => {
+  const agents = [{ id: 'already-running', status: 'running' }]
+  await withPlugin({ agents, config: { enabled: false, reconcileSeconds: 0.05 } }, async (ctx) => {
+    ctx.dispatch('agent/status', { agent: { id: 'new-session' }, status: 'running' })
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    assert.equal(heldForSelf().length, 0, 'no assertion after initial reconcile, events, or ticks')
+  })
+  assert.equal(heldForSelf().length, 0, 'nothing remains after disposal')
 })
 
 test('a running session acquires, an idle one releases', { skip: !isDarwin }, async () => {
