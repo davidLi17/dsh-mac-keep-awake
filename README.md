@@ -154,13 +154,17 @@ get status() { return this.phase.kind === 'idle' || this.phase.kind === 'mainten
 
 ## 安装
 
+本仓库是 davidLi17 的定制分支，不发布到 npm。请从本仓库的 `main` 分支下载或克隆源码，在仓库目录内执行以下命令。
+
 ```bash
 # 1. 打包并暂存到 profile 的 vendor/ 目录
 node scripts/install.mjs
 
 # 2. 用 DSH 插件管理器装（desktop profile 只能由 Electron 应用管理）
-#    spec: file:vendor/dsh-mac-keep-awake-1.4.2.tgz
+#    spec: file:vendor/dsh-mac-keep-awake-26.11.9-lhg.tgz
 ```
+
+安装包包含原始 MIT 许可和中英文说明；打包会保留 profile 中已有的旧安装包。
 
 安装后 bundle 自带的 `cordis.patch.yml` 会插入 Host 半身；
 `patchReload: live` 意味着改完 `src/` 重新安装即可生效，无需重启应用。

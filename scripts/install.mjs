@@ -52,6 +52,9 @@ execFileSync(
     './index.js',
     './src',
     './cordis.patch.yml',
+    './LICENSE',
+    './README.md',
+    './README.en.md',
   ],
   { stdio: 'inherit', env: { ...process.env, COPYFILE_DISABLE: '1' } },
 )

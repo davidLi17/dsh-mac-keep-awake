@@ -180,14 +180,18 @@ by default; `maxHours` and `reconcileSeconds` keep their existing behavior.
 
 ## Installation
 
+This is davidLi17's custom fork and is not published to npm. Download or clone this repository's `main` branch, then run the following from the repository directory.
+
 ```bash
 # 1. Pack and stage it into the profile's vendor/ directory
 node scripts/install.mjs
 
 # 2. Install it with the DSH plugin manager (the desktop profile can only be
 #    managed by the Electron app)
-#    spec: file:vendor/dsh-mac-keep-awake-1.4.2.tgz
+#    spec: file:vendor/dsh-mac-keep-awake-26.11.9-lhg.tgz
 ```
+
+The installation archive includes the original MIT license and both guides. Staging an update preserves older archives already in the profile.
 
 After installation the bundle's own `cordis.patch.yml` inserts the Host half;
 `patchReload: live` means that after editing `src/` you just reinstall for it to take
