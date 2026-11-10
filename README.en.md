@@ -7,6 +7,18 @@ A DeepSeek Harness plugin that keeps the Mac from idle-sleeping while a session 
 > While any DSH session is running, hold a macOS power assertion so the machine
 > does not idle-sleep and interrupt the session.
 
+## DSH 0.2.2-rc.1 support
+
+Fork version `26.11.10-lhg` was checked against official tag `dsh-v0.2.2-rc.1` (`66491b05`), installed through the official CLI into an isolated Web profile, and exercised with the real AgentLoop, Session and AgentRegistry. Existing configuration and sleep behavior are unchanged.
+
+The integration uses real scoped events, running/idle transitions, hot reload, disabled mode, maintenance compaction and disposal. Only the model response and caffeinate process boundary are simulated. Linux regression tests pass with macOS-only kernel/desktop tests explicitly skipped; this is not a claim of real macOS sleep validation.
+
+```bash
+# The repository must also resolve the official host dependencies.
+DSH_HOST_NODE_MODULES=/path/to/official-rc1/node_modules npm run test:host
+npm test
+```
+
 ## What it does
 
 As long as **any one DSH session is running**, the plugin holds one macOS power
@@ -188,7 +200,7 @@ node scripts/install.mjs
 
 # 2. Install it with the DSH plugin manager (the desktop profile can only be
 #    managed by the Electron app)
-#    spec: file:vendor/dsh-mac-keep-awake-26.11.9-lhg.tgz
+#    spec: file:vendor/dsh-mac-keep-awake-26.11.10-lhg.tgz
 ```
 
 The installation archive includes the original MIT license and both guides. Staging an update preserves older archives already in the profile.

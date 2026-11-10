@@ -1,6 +1,6 @@
 {
   "name": "dsh-mac-keep-awake",
-  "version": "26.11.9-lhg",
+  "version": "26.11.10-lhg",
   "description": "Keep macOS awake (no idle system sleep) while a DeepSeek Harness session is running. · 会话进行时不让 Mac 空闲休眠的 DSH 插件。",
   "repository": {
     "type": "git",
@@ -40,6 +40,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": "0.2.2-rc.1",
+      "dshReleases": {
+        "0.2.2-rc.1": "compatible"
+      }
     }
   },
   "peerDependencies": {
@@ -53,6 +59,7 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "prepublishOnly": "node --test test/*.test.js",
-    "pack:install": "node scripts/install.mjs"
+    "pack:install": "node scripts/install.mjs",
+    "test:host": "node scripts/check-dsh-host.mjs"
   }
 }

@@ -7,6 +7,19 @@
 > While any DSH session is running, hold a macOS power assertion so the machine
 > does not idle-sleep and interrupt the session.
 
+## DSH 0.2.2-rc.1 支持
+
+自用版 `26.11.10-lhg` 已核对官方 `dsh-v0.2.2-rc.1` 源码（`66491b05`），并通过官方 CLI 隔离 Web profile 安装与真实 AgentLoop/Session/AgentRegistry 集成测试。保留原有休眠策略和配置，不替换用户安装。
+
+集成测试使用真实 rc1 服务、作用域事件、运行/空闲切换、热重载、禁用状态、手动压缩及销毁流程，仅模型响应和 `caffeinate` 进程边界为本地模拟。Linux 回归 48 项通过、15 项 macOS 条件测试跳过；这不等同于 macOS 内核电源断言、桌面或实际睡眠验收。
+
+复现（仓库需可解析官方宿主依赖；不调用付费模型）：
+
+```bash
+DSH_HOST_NODE_MODULES=/path/to/official-rc1/node_modules npm run test:host
+npm test
+```
+
 ## 它做什么
 
 只要**有任意一个 DSH 会话处于运行中**，插件就持有一次 macOS 电源断言
@@ -161,7 +174,7 @@ get status() { return this.phase.kind === 'idle' || this.phase.kind === 'mainten
 node scripts/install.mjs
 
 # 2. 用 DSH 插件管理器装（desktop profile 只能由 Electron 应用管理）
-#    spec: file:vendor/dsh-mac-keep-awake-26.11.9-lhg.tgz
+#    spec: file:vendor/dsh-mac-keep-awake-26.11.10-lhg.tgz
 ```
 
 安装包包含原始 MIT 许可和中英文说明；打包会保留 profile 中已有的旧安装包。
